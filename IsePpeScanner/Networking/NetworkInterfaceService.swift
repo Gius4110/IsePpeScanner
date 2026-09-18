@@ -7,7 +7,7 @@ import Foundation
 
 /// Detecta la interfaz de red activa (Wi-Fi/Ethernet) de la Mac para
 /// prellenar el rango de escaneo con la subred actual del usuario.
-enum NetworkInterfaceService {
+nonisolated enum NetworkInterfaceService {
 
     struct SubredLocal {
         let interfaz: String
@@ -15,6 +15,7 @@ enum NetworkInterfaceService {
         let mascara: String
         let inicioRango: String
         let finRango: String
+        let direccionBroadcast: String
     }
 
     /// Recorre las interfaces de red con `getifaddrs()` y devuelve la
@@ -62,7 +63,8 @@ enum NetworkInterfaceService {
                     direccionIP: ip,
                     mascara: mascara,
                     inicioRango: inicio,
-                    finRango: fin
+                    finRango: fin,
+                    direccionBroadcast: IPRangeParser.enteroADireccion(broadcast)
                 )
             )
         }

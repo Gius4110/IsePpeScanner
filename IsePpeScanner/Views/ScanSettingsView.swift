@@ -13,6 +13,7 @@ struct ScanSettingsView: View {
         .puertosComunesPorDefecto
         .map(String.init)
         .joined(separator: ", ")
+    @AppStorage("intervaloMonitoreoMinutos") private var intervaloMonitoreoMinutos = 2
 
     @Environment(\.dismiss) private var cerrar
 
@@ -28,6 +29,20 @@ struct ScanSettingsView: View {
                     .foregroundStyle(.secondary)
                 TextField("21, 22, 23, 80, 443...", text: $puertosPersonalizadosTexto)
                     .disabled(!escaneoPuertosHabilitado)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Monitoreo automático")
+                    .font(.headline)
+                Picker("Reescanear cada", selection: $intervaloMonitoreoMinutos) {
+                    Text("1 minuto").tag(1)
+                    Text("2 minutos").tag(2)
+                    Text("5 minutos").tag(5)
+                    Text("10 minutos").tag(10)
+                    Text("15 minutos").tag(15)
+                }
             }
 
             HStack {
@@ -62,6 +77,12 @@ extension ScanSettingsView {
             .filter { $0 > 0 && $0 <= 65_535 }
 
         return puertos.isEmpty ? PortScanner.puertosComunesPorDefecto : puertos
+    }
+
+    /// Intervalo configurado para el monitoreo automático, en segundos.
+    static func intervaloMonitoreoSegundos() -> TimeInterval {
+        let minutos = UserDefaults.standard.object(forKey: "intervaloMonitoreoMinutos") as? Int ?? 2
+        return TimeInterval(max(minutos, 1) * 60)
     }
 }
 

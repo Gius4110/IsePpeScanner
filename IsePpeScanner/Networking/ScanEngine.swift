@@ -19,25 +19,28 @@ final class ScanEngine {
     private(set) var total = 0
     private(set) var mensajeError: String?
 
+    /// Monitoreo automático: reescanea el mismo rango cada cierto tiempo y
+    /// reporta qué dispositivos aparecieron o desaparecieron.
+    private(set) var monitoreoActivo = false
+    private(set) var cambios: [CambioRed] = []
+    private var clavesActivasAnteriores: Set<String>?
+    private var tareaMonitoreo: Task<Void, Never>?
+
     /// Cuántos pings dejamos en vuelo a la vez para no saturar la red local.
     private static let concurrenciaMaxima = 64
+    private static let maximoCambiosGuardados = 200
 
     private var tareaEscaneo: Task<Void, Never>?
     private var puertosAEscanear: [Int] = []
 
     func iniciar(ips: [String], puertos: [Int] = []) {
         detener()
+        detenerMonitoreo()
         mensajeError = nil
         guard !ips.isEmpty else { return }
 
-        resultados = ips.map { HostResult(ip: $0) }
-        completados = 0
-        total = ips.count
-        escaneando = true
-        puertosAEscanear = puertos
-
         tareaEscaneo = Task { [weak self] in
-            await self?.ejecutarBarrido(ips: ips)
+            await self?.realizarEscaneo(ips: ips, puertos: puertos)
         }
     }
 
@@ -45,6 +48,74 @@ final class ScanEngine {
         tareaEscaneo?.cancel()
         tareaEscaneo = nil
         escaneando = false
+    }
+
+    /// Activa el monitoreo automático: repite el escaneo del mismo rango
+    /// cada `intervaloSegundos` y avisa (notificación + registro) de
+    /// cualquier dispositivo nuevo o que haya dejado de responder.
+    func iniciarMonitoreo(ips: [String], puertos: [Int], intervaloSegundos: TimeInterval) {
+        detenerMonitoreo()
+        detener()
+        guard !ips.isEmpty else { return }
+
+        monitoreoActivo = true
+        clavesActivasAnteriores = nil
+
+        tareaMonitoreo = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.realizarEscaneo(ips: ips, puertos: puertos)
+                guard !Task.isCancelled else { return }
+                self.compararYRegistrarCambios()
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: UInt64(max(intervaloSegundos, 30) * 1_000_000_000))
+            }
+        }
+    }
+
+    func detenerMonitoreo() {
+        tareaMonitoreo?.cancel()
+        tareaMonitoreo = nil
+        monitoreoActivo = false
+    }
+
+    private func realizarEscaneo(ips: [String], puertos: [Int]) async {
+        resultados = ips.map { HostResult(ip: $0) }
+        completados = 0
+        total = ips.count
+        escaneando = true
+        puertosAEscanear = puertos
+
+        await ejecutarBarrido(ips: ips)
+    }
+
+    /// Compara los hosts activos de este escaneo contra los del anterior y
+    /// registra + notifica las diferencias. La primera pasada solo guarda
+    /// el punto de partida, sin reportar nada (para no avisar de "nuevos"
+    /// a todos los hosts en el primer escaneo del monitoreo).
+    private func compararYRegistrarCambios() {
+        let activasAhora = Set(resultados.filter { $0.estado == .activo }.map(\.ip))
+        defer { clavesActivasAnteriores = activasAhora }
+
+        guard let anteriores = clavesActivasAnteriores else { return }
+
+        for ip in activasAhora.subtracting(anteriores) {
+            guard let host = resultados.first(where: { $0.ip == ip }) else { continue }
+            registrarCambio(tipo: .nuevo, host: host)
+        }
+        for ip in anteriores.subtracting(activasAhora) {
+            guard let host = resultados.first(where: { $0.ip == ip }) else { continue }
+            registrarCambio(tipo: .desconectado, host: host)
+        }
+    }
+
+    private func registrarCambio(tipo: CambioRed.Tipo, host: HostResult) {
+        let cambio = CambioRed(fecha: Date(), tipo: tipo, ip: host.ip, hostname: host.hostname, fabricante: host.fabricante)
+        cambios.insert(cambio, at: 0)
+        if cambios.count > Self.maximoCambiosGuardados {
+            cambios.removeLast(cambios.count - Self.maximoCambiosGuardados)
+        }
+        NotificadorDeRed.enviar(cambio: cambio)
     }
 
     private func ejecutarBarrido(ips: [String]) async {

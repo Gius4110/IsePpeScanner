@@ -9,6 +9,10 @@ import SwiftUI
 
 @main
 struct IsePpeScannerApp: App {
+    init() {
+        NotificadorDeRed.configurar()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

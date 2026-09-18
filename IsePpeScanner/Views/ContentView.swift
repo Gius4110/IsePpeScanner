@@ -20,6 +20,11 @@ struct ContentView: View {
         let id: String
     }
 
+    private struct AlertaWOL: Identifiable {
+        let id = UUID()
+        let mensaje: String
+    }
+
     @State private var motor = ScanEngine()
     @State private var aliasStore = AliasStore()
     @State private var ipInicio = ""
@@ -31,6 +36,8 @@ struct ContentView: View {
     @State private var textoBusqueda = ""
     @State private var edicionActual: EdicionAlias?
     @State private var textoAliasEditado = ""
+    @State private var mostrarActividad = false
+    @State private var alertaWOL: AlertaWOL?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,8 +65,21 @@ struct ContentView: View {
         .popover(item: $edicionActual) { edicion in
             editorDeAlias(clave: edicion.id)
         }
+        .alert(item: $alertaWOL) { alerta in
+            Alert(title: Text("Wake-on-LAN"), message: Text(alerta.mensaje), dismissButton: .default(Text("Entendido")))
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    mostrarActividad = true
+                } label: {
+                    Label("Actividad", systemImage: motor.cambios.isEmpty ? "bell" : "bell.badge.fill")
+                }
+                .help("Ver cambios detectados en la red")
+                .popover(isPresented: $mostrarActividad) {
+                    ActividadRedView(cambios: motor.cambios)
+                }
+
                 Button {
                     exportarCSV()
                 } label: {
@@ -112,6 +132,13 @@ struct ContentView: View {
                     }
                 }
 
+                Toggle(isOn: bindingMonitoreo) {
+                    Label("Vigilancia", systemImage: motor.monitoreoActivo ? "eye.fill" : "eye")
+                }
+                .toggleStyle(.button)
+                .tint(.cyan)
+                .help("Reescanea automáticamente y te avisa si algo cambia en la red")
+
                 Button {
                     motor.escaneando ? motor.detener() : iniciarEscaneo()
                 } label: {
@@ -124,6 +151,16 @@ struct ContentView: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .tint(motor.escaneando ? .red : .accentColor)
+                .disabled(motor.monitoreoActivo)
+            }
+
+            if motor.monitoreoActivo {
+                Label(
+                    "Vigilancia activa: reescaneando cada \(Int(ScanSettingsView.intervaloMonitoreoSegundos() / 60)) min. Te avisamos si algo cambia.",
+                    systemImage: "eye.fill"
+                )
+                .font(.callout)
+                .foregroundStyle(.cyan)
             }
 
             if let errorRango {
@@ -133,6 +170,19 @@ struct ContentView: View {
             }
         }
         .padding(14)
+    }
+
+    private var bindingMonitoreo: Binding<Bool> {
+        Binding(
+            get: { motor.monitoreoActivo },
+            set: { activar in
+                if activar {
+                    iniciarMonitoreoContinuo()
+                } else {
+                    motor.detenerMonitoreo()
+                }
+            }
+        )
     }
 
     // MARK: - Tarjetas de estadísticas
@@ -191,11 +241,9 @@ struct ContentView: View {
             .width(min: 150, ideal: 210)
 
             TableColumn("MAC") { host in
-                Text(host.mac ?? "—")
-                    .monospaced()
-                    .foregroundStyle(host.mac == nil ? .tertiary : .primary)
+                celdaMAC(host)
             }
-            .width(min: 120, ideal: 140)
+            .width(min: 150, ideal: 170)
 
             TableColumn("Fabricante") { host in
                 Text(host.fabricante ?? "—")
@@ -290,10 +338,37 @@ struct ContentView: View {
 
             Spacer(minLength: 4)
 
-            BotonEditarAlias {
+            BotonAccionFila(icono: "square.and.pencil", ayuda: "Ponerle nombre a este dispositivo") {
                 textoAliasEditado = alias ?? ""
                 edicionActual = EdicionAlias(id: clave(de: host))
             }
+        }
+    }
+
+    private func celdaMAC(_ host: HostResult) -> some View {
+        HStack(spacing: 4) {
+            Text(host.mac ?? "—")
+                .monospaced()
+                .foregroundStyle(host.mac == nil ? .tertiary : .primary)
+
+            if let mac = host.mac {
+                Spacer(minLength: 4)
+                BotonAccionFila(icono: "bolt.fill", colorActivo: .cyan, ayuda: "Despertar este equipo (Wake-on-LAN)") {
+                    despertarEquipo(mac: mac)
+                }
+            }
+        }
+    }
+
+    private func despertarEquipo(mac: String) {
+        let broadcast = NetworkInterfaceService.subredActiva()?.direccionBroadcast ?? "255.255.255.255"
+        do {
+            try WakeOnLanService.despertar(mac: mac, direccionBroadcast: broadcast)
+            alertaWOL = AlertaWOL(
+                mensaje: "Se envió la señal para despertar el equipo con MAC \(mac).\n\nEsto solo funciona si ese equipo tiene Wake-on-LAN activado en su configuración y sigue conectado a la corriente y a la red."
+            )
+        } catch {
+            alertaWOL = AlertaWOL(mensaje: "No se pudo enviar la señal: \(error.localizedDescription)")
         }
     }
 
@@ -390,6 +465,21 @@ struct ContentView: View {
         }
     }
 
+    private func iniciarMonitoreoContinuo() {
+        do {
+            let ips = try IPRangeParser.parsear(inicio: ipInicio, fin: ipFin)
+            errorRango = nil
+            NotificadorDeRed.solicitarPermiso()
+            motor.iniciarMonitoreo(
+                ips: ips,
+                puertos: ScanSettingsView.puertosConfigurados(),
+                intervaloSegundos: ScanSettingsView.intervaloMonitoreoSegundos()
+            )
+        } catch {
+            errorRango = error.localizedDescription
+        }
+    }
+
     private func exportarCSV() {
         let panel = NSSavePanel()
         panel.title = "Exportar resultados"
@@ -448,24 +538,92 @@ private struct TarjetaEstadistica: View {
     }
 }
 
-private struct BotonEditarAlias: View {
-    let alHacerClic: () -> Void
+private struct BotonAccionFila: View {
+    let icono: String
+    var colorActivo: Color = .accentColor
+    let ayuda: String
+    let accion: () -> Void
     @State private var enHover = false
 
     var body: some View {
-        Button(action: alHacerClic) {
-            Image(systemName: "square.and.pencil")
+        Button(action: accion) {
+            Image(systemName: icono)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(enHover ? Color.accentColor : Color.secondary.opacity(0.7))
+                .foregroundStyle(enHover ? colorActivo : Color.secondary.opacity(0.7))
                 .frame(width: 22, height: 22)
                 .background(
-                    Circle().fill(enHover ? Color.accentColor.opacity(0.15) : .clear)
+                    Circle().fill(enHover ? colorActivo.opacity(0.15) : .clear)
                 )
         }
         .buttonStyle(.plain)
         .onHover { enHover = $0 }
         .animation(.easeOut(duration: 0.12), value: enHover)
-        .help("Ponerle nombre a este dispositivo")
+        .help(ayuda)
+    }
+}
+
+private struct ActividadRedView: View {
+    let cambios: [CambioRed]
+
+    private static let formateador: DateFormatter = {
+        let formato = DateFormatter()
+        formato.dateStyle = .none
+        formato.timeStyle = .short
+        return formato
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Actividad de la red")
+                .font(.headline)
+                .padding(12)
+            Divider()
+
+            if cambios.isEmpty {
+                Text("Aún no se ha detectado ningún cambio. Activa la Vigilancia para empezar a monitorear tu red.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .padding(16)
+                    .frame(width: 280, alignment: .leading)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(cambios) { cambio in
+                            fila(cambio)
+                            Divider()
+                        }
+                    }
+                }
+                .frame(width: 300, height: 320)
+            }
+        }
+    }
+
+    private func fila(_ cambio: CambioRed) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: cambio.tipo == .nuevo ? "plus.circle.fill" : "minus.circle.fill")
+                .foregroundStyle(cambio.tipo == .nuevo ? .green : .red)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(cambio.tipo == .nuevo ? "Nuevo dispositivo" : "Se desconectó")
+                    .font(.callout.weight(.medium))
+                Text(cambio.hostname ?? cambio.fabricante ?? cambio.ip)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(cambio.ip)
+                    .font(.caption2)
+                    .monospaced()
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+
+            Text(Self.formateador.string(from: cambio.fecha))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(10)
     }
 }
 

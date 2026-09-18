@@ -7,7 +7,7 @@ import Foundation
 
 /// Convierte lo que el usuario escribe (rango inicio–fin o CIDR) en la lista
 /// de direcciones IPv4 a escanear.
-enum IPRangeParser {
+nonisolated enum IPRangeParser {
 
     struct RangoInvalidoError: LocalizedError {
         let mensaje: String
